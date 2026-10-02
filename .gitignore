@@ -1,0 +1,83 @@
+# FixFlow — Monorepo
+
+# ─── Python ───────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib64/
+# Python venv lib dirs — scoped to avoid catching frontend/lib
+venv/lib/
+.venv/lib/
+ENV/lib/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+.venv/
+venv/
+env/
+ENV/
+
+# ─── Node ─────────────────────────────────────────────────────
+node_modules/
+.next/
+.turbo/
+out/
+dist/
+*.tsbuildinfo
+
+# ─── Environment & Secrets ────────────────────────────────────
+.env
+.env.local
+.env.*.local
+!.env.example
+*.pem
+*.key
+private_key*
+
+# ─── Database ─────────────────────────────────────────────────
+*.sqlite3
+*.db
+*.sqlite
+
+# ─── Logs ─────────────────────────────────────────────────────
+*.log
+logs/
+
+# ─── OS ───────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+
+# ─── Docker ───────────────────────────────────────────────────
+docker-compose.override.yml
+
+# ─── Documents & Binaries (not for repo) ──────────────────────
+*.pdf
+*.docx
+*.doc
+*.xlsx
+*.xls
+*.pptx
+*.ppt
+PatchR_Final_Docs/
+docs/
+*.exe
+ngrok.exe
+ngrok
+cookies.txt
+vercel_page.html
+.freebuff/

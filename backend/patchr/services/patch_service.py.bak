@@ -1,0 +1,231 @@
+"""
+Patch Generation Service — Phase 4
+
+Generates AI-proposed code patches after analysis is complete.
+Each patch is:
+  1. Proposed by AI (untrusted)
+  2. Stored with confidence + risk scores
+  3. Awaiting human approval (owner gate)
+  4. Never applied automatically
+"""
+
+from __future__ import annotations
+
+import uuid
+from datetime import datetime, timezone
+
+import structlog
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from patchr.ai.provider import PatchContext, get_ai_provider
+from patchr.config import get_settings
+from patchr.db.models import Analysis, AuditAction, AuditLog, Incident, Patch, Repository
+
+logger = structlog.get_logger(__name__)
+
+
+async def generate_patch(
+    db: AsyncSession,
+    *,
+    incident: Incident,
+    analysis: Analysis,
+) -> Patch | None:
+    """
+    Generate an AI-proposed patch for a confirmed incident analysis.
+
+    Requires:
+    - An Analysis record with confidence >= 0.5
+    - The incident must be in "patch_ready" or "needs_review" status
+    - NVIDIA_API_KEY must be configured
+
+    Returns None if the AI provider is not configured or analysis confidence is too low.
+    Raises ValueError if the AI returns invalid output.
+    """
+    settings = get_settings()
+
+    if not settings.nvidia_api_key or settings.nvidia_api_key.startswith("nvapi-xxx"):
+        logger.warning("patch_skipped_no_api_key", incident_id=str(incident.id))
+        return None
+
+    if analysis.confidence < 0.4:
+        logger.info(
+            "patch_skipped_low_confidence",
+            incident_id=str(incident.id),
+            confidence=analysis.confidence,
+        )
+        return None
+
+    # Check for an existing proposed patch (avoid duplicates)
+    existing = await db.execute(
+        select(Patch).where(
+            Patch.incident_id == incident.id,
+            Patch.analysis_id == analysis.id,
+            Patch.status == "proposed",
+        )
+    )
+    if existing.scalar_one_or_none():
+        logger.info("patch_skipped_already_exists", incident_id=str(incident.id))
+        return None
+
+    # Load repository for context
+    repo_result = await db.execute(
+        select(Repository).where(Repository.id == incident.repository_id)
+    )
+    repo = repo_result.scalar_one_or_none()
+
+    logger.info(
+        "patch_generation_started",
+        incident_id=str(incident.id),
+        analysis_id=str(analysis.id),
+        confidence=analysis.confidence,
+    )
+
+    try:
+        # Build the context the AI needs — fetch actual file contents
+        from patchr.services.context_service import build_incident_context
+
+        ctx = await build_incident_context(
+            incident_id=str(incident.id),
+            repo=repo,
+            commit_sha=incident.commit_sha,
+            affected_files=analysis.affected_files or [],
+            build_logs="",  # AI uses analysis result, not raw logs for patch generation
+            error_message=incident.title,
+            commit_message=incident.commit_message,
+            commit_author=None,
+            github_token=settings.github_token or None,
+        )
+
+        patch_ctx = PatchContext(
+            incident_id=str(incident.id),
+            analysis=_analysis_to_result(analysis),
+            incident_context=ctx,
+        )
+
+        ai = get_ai_provider()
+        result = await ai.generate_patch(patch_ctx)
+
+        # Serialize file changes
+        file_changes = [fc.model_dump() for fc in result.file_changes]
+
+        # Store the patch
+        patch = Patch(
+            id=uuid.uuid4(),
+            incident_id=incident.id,
+            analysis_id=analysis.id,
+            model_provider="nvidia_nim",
+            model_name=settings.nvidia_model,
+            description=result.description,
+            file_changes=file_changes,
+            confidence=result.confidence,
+            risk_level=result.risk_level,
+            status="proposed",
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        )
+
+        db.add(patch)
+
+        # Update incident status — patch has been proposed
+        incident.status = "repair_proposed"
+        incident.updated_at = datetime.now(timezone.utc)
+
+        # Audit log
+        db.add(AuditLog(
+            id=uuid.uuid4(),
+            incident_id=incident.id,
+            action="patch_generated",
+            actor="system:ai",
+            details={
+                "confidence": result.confidence,
+                "risk_level": result.risk_level,
+                "files_changed": [fc.path for fc in result.file_changes],
+            },
+            entity_type="patch",
+            entity_id=str(patch.id),
+            created_at=datetime.now(timezone.utc),
+        ))
+
+        await db.flush()
+
+        # Phase 5 — run automatic verification/risk scoring
+        try:
+            from patchr.services.verification_service import verify_and_store
+            verification = await verify_and_store(
+                db=db,
+                patch_id=str(patch.id),
+                file_changes=file_changes,
+                confidence=result.confidence,
+                diff=None,
+            )
+            # Upgrade risk level if verifier found issues
+            if verification.risk_level == "high" and patch.risk_level != "high":
+                patch.risk_level = "high"
+
+            # Transition incident to verified or awaiting_review based on risk
+            if verification.passed and verification.risk_level in ("low", "medium"):
+                incident.status = "verified"
+            else:
+                incident.status = "awaiting_review"
+
+            await db.flush()
+            logger.info(
+                "patch_verification_stored",
+                patch_id=str(patch.id),
+                risk_score=round(verification.risk_score, 3),
+                risk_level=verification.risk_level,
+            )
+        except Exception as ve:
+            logger.warning("patch_verification_failed", error=str(ve))
+
+        await db.commit()
+        await db.refresh(patch)
+
+        logger.info(
+            "patch_generated",
+            incident_id=str(incident.id),
+            patch_id=str(patch.id),
+            confidence=result.confidence,
+            files=len(result.file_changes),
+        )
+        return patch
+
+
+    except Exception as exc:
+        logger.error(
+            "patch_generation_failed",
+            incident_id=str(incident.id),
+            error=str(exc),
+        )
+        db.add(AuditLog(
+            id=uuid.uuid4(),
+            incident_id=incident.id,
+            action=AuditAction.PATCH_GENERATION_FAILED,
+            actor="system:ai",
+            details={"error": str(exc)},
+            entity_type="incident",
+            entity_id=str(incident.id),
+            created_at=datetime.now(timezone.utc),
+        ))
+        await db.commit()
+        return None
+
+
+# ─── Helpers ──────────────────────────────────────────────────────────────────
+
+
+def _analysis_to_result(analysis: Analysis):
+    """Convert an Analysis DB row to the AnalysisResult schema."""
+    from patchr.ai.schemas import AnalysisResult
+
+    return AnalysisResult(
+        failure_type=analysis.failure_type or "unknown",
+        root_cause=analysis.root_cause or "",
+        affected_files=analysis.affected_files or [],
+        evidence=analysis.evidence or [],
+        confidence=analysis.confidence or 0.0,
+        risk_level=analysis.risk_level or "medium",
+        verification_plan=analysis.verification_plan or [],
+        summary=analysis.root_cause[:200] if analysis.root_cause else "",
+    )
