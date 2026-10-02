@@ -81,3 +81,8 @@ ngrok
 cookies.txt
 vercel_page.html
 .freebuff/
+
+# Exclude all .md files except root README
+*.md
+!readme.md
+!README.md
