@@ -559,6 +559,59 @@ class GitHubClient:
         )
         return branch_name, pr_data["number"], pr_data["html_url"]
 
+    async def push_changes_to_branch(
+        self,
+        full_name: str,
+        branch: str,
+        file_changes: list[dict],
+        incident_title: str,
+    ) -> tuple[str, list[str]]:
+        """
+        Commit the patch file changes DIRECTLY to an existing branch (no PR).
+
+        Each file is written via the Contents API, which produces one commit per
+        file on the target branch. Returns (commit_url_of_branch, committed_paths).
+
+        file_changes: list of dicts with keys:
+          path, patched_content, original_content, change_type, explanation
+        """
+        committed_paths: list[str] = []
+
+        for change in file_changes:
+            path = change.get("path", "")
+            new_content = change.get("patched_content") or ""
+            change_type = change.get("change_type", "modify")
+            explanation = change.get("explanation", "")
+
+            if not path or not new_content:
+                continue
+
+            # Need the current blob SHA to update an existing file.
+            existing = None
+            if change_type != "create":
+                existing = await self.get_file_content(full_name, path, branch)
+
+            commit_msg = f"fix({path}): {explanation or 'FixFlow automated fix'} [{incident_title[:60]}]"
+            await self.update_file(
+                full_name=full_name,
+                path=path,
+                content=new_content,
+                message=commit_msg,
+                branch=branch,
+                sha=existing.sha if existing else None,
+            )
+            committed_paths.append(path)
+            logger.info("github_file_pushed", path=path, branch=branch, repo=full_name)
+
+        branch_url = f"https://github.com/{full_name}/tree/{branch}"
+        logger.info(
+            "github_direct_push_complete",
+            repo=full_name,
+            branch=branch,
+            files=len(committed_paths),
+        )
+        return branch_url, committed_paths
+
     async def create_webhook(
         self,
         full_name: str,

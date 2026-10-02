@@ -10,6 +10,7 @@ import {
   type Analysis,
   type Patch,
   type AuditLog,
+  type AffectedSource,
 } from "@/lib/api-client";
 import { STATUS_LABELS, SEVERITY_LABELS, FAILURE_TYPE_LABELS, PATCH_STATUS_LABELS } from "@/lib/design-tokens";
 
@@ -24,7 +25,7 @@ export default function IncidentDetailPage({ params }: Props) {
   const [patches, setPatches] = useState<Patch[]>([]);
   const [auditLogs, setAuditLogs] = useState<AuditLog[]>([]);
   const [loading, setLoading] = useState(true);
-  const [activeTab, setActiveTab] = useState<"analysis" | "impact" | "patch" | "verification" | "audit">("analysis");
+  const [activeTab, setActiveTab] = useState<"analysis" | "patch" | "audit">("analysis");
   const [analyzing, setAnalyzing] = useState(false);
   const [analyzeMsg, setAnalyzeMsg] = useState<string | null>(null);
   const pollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -286,9 +287,7 @@ export default function IncidentDetailPage({ params }: Props) {
       >
         {[
           { key: "analysis" as const, label: `Analysis (${analyses.length})` },
-          { key: "impact" as const, label: `Impact` },
           { key: "patch" as const, label: `Patches (${patches.length})` },
-          { key: "verification" as const, label: `Verification` },
           { key: "audit" as const, label: `Audit (${auditLogs.length})` },
         ].map((tab) => (
           <button
@@ -314,14 +313,12 @@ export default function IncidentDetailPage({ params }: Props) {
 
       {/* ── Tab Panels ── */}
       {activeTab === "analysis" && (
-        <AnalysisPanel analysis={latestAnalysis} />
-      )}
-      {activeTab === "impact" && (
-        <ImpactPanel analysis={latestAnalysis} />
+        <AnalysisPanel analysis={latestAnalysis} incidentId={id} />
       )}
       {activeTab === "patch" && (
         <PatchPanel
           patch={latestPatch}
+          incidentId={id}
           hasAnalysis={latestAnalysis !== null}
           onGenerate={async () => {
             const result = await patchesApi.generate(id);
@@ -339,9 +336,6 @@ export default function IncidentDetailPage({ params }: Props) {
             setPatches((prev) => prev.map((p) => (p.id === updated.id ? updated : p)));
           }}
         />
-      )}
-      {activeTab === "verification" && (
-        <VerificationPanel patch={latestPatch} />
       )}
       {activeTab === "audit" && (
         <AuditPanel logs={auditLogs} />
@@ -448,7 +442,30 @@ function PipelineProgress({
 
 // ─── Analysis Panel ───────────────────────────────────────────────────────────
 
-function AnalysisPanel({ analysis }: { analysis: Analysis | null }) {
+function AnalysisPanel({ analysis, incidentId }: { analysis: Analysis | null; incidentId: string }) {
+  const [sources, setSources] = useState<AffectedSource[]>([]);
+  const [sourcesLoading, setSourcesLoading] = useState(false);
+
+  useEffect(() => {
+    if (!analysis) return;
+    let cancelled = false;
+    setSourcesLoading(true);
+    incidentsApi
+      .getAffectedSources(incidentId)
+      .then((res) => {
+        if (!cancelled) setSources(res);
+      })
+      .catch(() => {
+        if (!cancelled) setSources([]);
+      })
+      .finally(() => {
+        if (!cancelled) setSourcesLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [analysis, incidentId]);
+
   if (!analysis) {
     return (
       <EmptyPanel
@@ -471,51 +488,53 @@ function AnalysisPanel({ analysis }: { analysis: Analysis | null }) {
         </p>
       </div>
 
-      {/* Evidence */}
-      {analysis.evidence && analysis.evidence.length > 0 && (
-        <div className="card">
-          <p className="label" style={{ marginBottom: "0.875rem" }}>EVIDENCE</p>
-          <div style={{ display: "flex", flexDirection: "column", gap: "0.5rem" }}>
-            {analysis.evidence.map((ev, i) => (
-              <div
-                key={i}
-                style={{
-                  background: "var(--bg-surface-2)",
-                  border: "1px solid var(--border)",
-                  borderRadius: "var(--radius-md)",
-                  padding: "0.875rem 1rem",
-                  fontSize: "0.8125rem",
-                  fontFamily: "var(--font-mono)",
-                  color: "var(--text-secondary)",
-                  lineHeight: 1.5,
-                }}
-              >
-                {ev}
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
-
       {/* Affected files */}
       {analysis.affected_files && analysis.affected_files.length > 0 && (
         <div className="card">
           <p className="label" style={{ marginBottom: "0.875rem" }}>AFFECTED FILES</p>
           <div style={{ display: "flex", flexDirection: "column", gap: "0.5rem" }}>
-            {analysis.affected_files.map((f, i) => (
-              <div key={i} style={{ display: "flex", alignItems: "center", gap: "0.625rem" }}>
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none">
-                  <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" stroke="var(--text-dim)" strokeWidth="1.5" />
-                  <polyline points="14 2 14 8 20 8" stroke="var(--text-dim)" strokeWidth="1.5" />
-                </svg>
-                <code style={{ fontSize: "0.8125rem", color: "var(--text-primary)", fontFamily: "var(--font-mono)", fontWeight: 500 }}>
-                  {f}
-                </code>
-              </div>
-            ))}
+            {analysis.affected_files.map((f, i) => {
+              // Show the actual source root the file lives in — the real
+              // repository (e.g. "owner/repo") prefixed before the file path,
+              // so "src/main.js" reads as "owner/repo/src/main.js".
+              const sourcePath = analysis.repository_full_name
+                ? `${analysis.repository_full_name}/${f}`
+                : f;
+              return (
+                <div key={i} style={{ display: "flex", alignItems: "center", gap: "0.625rem" }}>
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none">
+                    <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" stroke="var(--text-dim)" strokeWidth="1.5" />
+                    <polyline points="14 2 14 8 20 8" stroke="var(--text-dim)" strokeWidth="1.5" />
+                  </svg>
+                  <code style={{ fontSize: "0.8125rem", color: "var(--text-primary)", fontFamily: "var(--font-mono)", fontWeight: 500 }}>
+                    {sourcePath}
+                  </code>
+                </div>
+              );
+            })}
           </div>
         </div>
       )}
+
+      {/* Evidence — full source of each affected file, error line(s) in red */}
+      <div className="card">
+        <p className="label" style={{ marginBottom: "0.875rem" }}>EVIDENCE</p>
+        {sourcesLoading && sources.length === 0 ? (
+          <p style={{ fontSize: "0.8125rem", color: "var(--text-dim)" }}>
+            Loading affected source code…
+          </p>
+        ) : sources.length === 0 ? (
+          <p style={{ fontSize: "0.8125rem", color: "var(--text-dim)" }}>
+            Source code is unavailable. Ensure a GitHub token is configured so PatchR can fetch the affected files.
+          </p>
+        ) : (
+          <div style={{ display: "flex", flexDirection: "column", gap: "1rem" }}>
+            {sources.map((src, i) => (
+              <AffectedFileSource key={i} source={src} />
+            ))}
+          </div>
+        )}
+      </div>
 
       {/* Model info */}
       <p style={{ fontSize: "0.6875rem", color: "var(--text-dim)", fontFamily: "var(--font-mono)", paddingLeft: "0.25rem" }}>
@@ -523,6 +542,96 @@ function AnalysisPanel({ analysis }: { analysis: Analysis | null }) {
         {analysis.prompt_tokens}pt + {analysis.completion_tokens}ct tokens ·{" "}
         {formatDateTime(analysis.created_at)}
       </p>
+    </div>
+  );
+}
+
+// ─── Affected File Source (full code, error lines highlighted red) ─────────────
+
+function AffectedFileSource({ source }: { source: AffectedSource }) {
+  const errorLineSet = new Set(source.error_lines || []);
+
+  return (
+    <div style={{ borderRadius: "var(--radius-md)", border: "1px solid #21262d", overflow: "hidden" }}>
+      {/* File header */}
+      <div
+        style={{
+          padding: "0.625rem 1rem",
+          background: "#161b22",
+          borderBottom: "1px solid #21262d",
+          display: "flex",
+          alignItems: "center",
+          gap: "0.5rem",
+        }}
+      >
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" style={{ color: "#8b949e", flexShrink: 0 }}>
+          <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" stroke="currentColor" strokeWidth="1.5" />
+          <polyline points="14 2 14 8 20 8" stroke="currentColor" strokeWidth="1.5" />
+        </svg>
+        <code style={{ fontSize: "0.8125rem", fontFamily: "var(--font-mono)", color: "#e6edf3", flex: 1 }}>
+          {source.path}
+        </code>
+        {errorLineSet.size > 0 && (
+          <span style={{ fontSize: "0.6875rem", color: "#f85149", fontWeight: 500 }}>
+            {errorLineSet.size} error line{errorLineSet.size > 1 ? "s" : ""}
+          </span>
+        )}
+      </div>
+
+      {/* Code body */}
+      {source.available && source.content != null ? (
+        <div
+          style={{
+            maxHeight: "480px",
+            overflow: "auto",
+            background: "#0d1117",
+            fontFamily: "var(--font-mono)",
+            fontSize: "0.8rem",
+            lineHeight: 1.6,
+          }}
+        >
+          <table style={{ width: "100%", borderCollapse: "collapse" }}>
+            <tbody>
+              {source.content.split("\n").map((line, idx) => {
+                const lineNo = idx + 1;
+                const isError = errorLineSet.has(lineNo);
+                return (
+                  <tr key={idx} style={{ background: isError ? "rgba(248,81,73,0.15)" : "transparent" }}>
+                    <td
+                      style={{
+                        padding: "0 1rem",
+                        color: isError ? "rgba(248,81,73,0.7)" : "#3d444d",
+                        userSelect: "none",
+                        textAlign: "right",
+                        minWidth: "2.5rem",
+                        fontSize: "0.75rem",
+                        borderRight: "1px solid #21262d",
+                        verticalAlign: "top",
+                      }}
+                    >
+                      {lineNo}
+                    </td>
+                    <td
+                      style={{
+                        padding: "0 1rem",
+                        color: isError ? "#f85149" : "#e6edf3",
+                        whiteSpace: "pre",
+                        verticalAlign: "top",
+                      }}
+                    >
+                      {line || " "}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      ) : (
+        <div style={{ padding: "1rem", background: "#0d1117", fontSize: "0.8125rem", color: "#8b949e" }}>
+          Source unavailable for this file.
+        </div>
+      )}
     </div>
   );
 }
@@ -616,16 +725,518 @@ function DiffViewer({ content }: { content: string }) {
   );
 }
 
+// ─── File Change Diff (full code: removed lines red, added lines green) ─────────
+
+type DiffRow = {
+  type: "context" | "removed" | "added";
+  oldNo: number | null;
+  newNo: number | null;
+  text: string;
+};
+
+/**
+ * Compute a line-level diff between the original and patched file content using
+ * a classic longest-common-subsequence table. Unchanged lines are shown as
+ * context, lines only in the original are "removed" (red), lines only in the
+ * patched version are "added" (green).
+ */
+function computeLineDiff(original: string, patched: string): DiffRow[] {
+  const a = original.length ? original.split("\n") : [];
+  const b = patched.length ? patched.split("\n") : [];
+  const n = a.length;
+  const m = b.length;
+
+  // LCS length table
+  const lcs: number[][] = Array.from({ length: n + 1 }, () => new Array(m + 1).fill(0));
+  for (let i = n - 1; i >= 0; i--) {
+    for (let j = m - 1; j >= 0; j--) {
+      lcs[i][j] = a[i] === b[j] ? lcs[i + 1][j + 1] + 1 : Math.max(lcs[i + 1][j], lcs[i][j + 1]);
+    }
+  }
+
+  const rows: DiffRow[] = [];
+  let i = 0;
+  let j = 0;
+  let oldNo = 1;
+  let newNo = 1;
+  while (i < n && j < m) {
+    if (a[i] === b[j]) {
+      rows.push({ type: "context", oldNo: oldNo++, newNo: newNo++, text: a[i] });
+      i++;
+      j++;
+    } else if (lcs[i + 1][j] >= lcs[i][j + 1]) {
+      rows.push({ type: "removed", oldNo: oldNo++, newNo: null, text: a[i] });
+      i++;
+    } else {
+      rows.push({ type: "added", oldNo: null, newNo: newNo++, text: b[j] });
+      j++;
+    }
+  }
+  while (i < n) {
+    rows.push({ type: "removed", oldNo: oldNo++, newNo: null, text: a[i] });
+    i++;
+  }
+  while (j < m) {
+    rows.push({ type: "added", oldNo: null, newNo: newNo++, text: b[j] });
+    j++;
+  }
+  return rows;
+}
+
+type FullDiffRow = {
+  type: "context" | "removed" | "added";
+  lineNo: number | null;
+  text: string;
+};
+
+/**
+ * Build a full-file view where the whole file is shown as context, and the
+ * patched region is spliced in as removed (red) + added (green) lines at the
+ * location where the original block appears in the file.
+ *
+ * Falls back sensibly when inputs are partial:
+ *  - no full file   → show the original (red) + patched (green) blocks only
+ *  - block not found → append the original (red) + patched (green) blocks after
+ *                      the full file context so nothing is lost
+ */
+function buildFullFileDiffRows(
+  fullFile: string,
+  original: string,
+  patched: string,
+): FullDiffRow[] {
+  const fileLines = fullFile.length ? fullFile.split("\n") : [];
+  const origLines = original.length ? original.split("\n") : [];
+  const patchedLines = patched.length ? patched.split("\n") : [];
+
+  // No full file available — show just the change (original red, patched green).
+  if (fileLines.length === 0) {
+    const rows: FullDiffRow[] = [];
+    origLines.forEach((t) => rows.push({ type: "removed", lineNo: null, text: t }));
+    patchedLines.forEach((t) => rows.push({ type: "added", lineNo: null, text: t }));
+    return rows;
+  }
+
+  // Locate the original block within the full file (exact sequence match).
+  let matchStart = -1;
+  if (origLines.length > 0) {
+    for (let i = 0; i + origLines.length <= fileLines.length; i++) {
+      let ok = true;
+      for (let k = 0; k < origLines.length; k++) {
+        if (fileLines[i + k] !== origLines[k]) {
+          ok = false;
+          break;
+        }
+      }
+      if (ok) {
+        matchStart = i;
+        break;
+      }
+    }
+  }
+
+  const rows: FullDiffRow[] = [];
+
+  if (matchStart === -1) {
+    // Couldn't locate the original block — show the full file as context, then
+    // the change block (removed red + added green) so the diff is still visible.
+    fileLines.forEach((t, idx) => rows.push({ type: "context", lineNo: idx + 1, text: t }));
+    origLines.forEach((t) => rows.push({ type: "removed", lineNo: null, text: t }));
+    patchedLines.forEach((t) => rows.push({ type: "added", lineNo: null, text: t }));
+    return rows;
+  }
+
+  // Context before the change
+  for (let i = 0; i < matchStart; i++) {
+    rows.push({ type: "context", lineNo: i + 1, text: fileLines[i] });
+  }
+  // Removed (original) lines — red
+  for (let k = 0; k < origLines.length; k++) {
+    rows.push({ type: "removed", lineNo: matchStart + k + 1, text: origLines[k] });
+  }
+  // Added (patched) lines — green
+  patchedLines.forEach((t) => rows.push({ type: "added", lineNo: null, text: t }));
+  // Context after the change
+  for (let i = matchStart + origLines.length; i < fileLines.length; i++) {
+    rows.push({ type: "context", lineNo: i + 1, text: fileLines[i] });
+  }
+
+  return rows;
+}
+
+function FileChangeRow({
+  change,
+  incidentId,
+  isLast,
+}: {
+  change: {
+    path: string;
+    change_type: string;
+    original_content: string | null;
+    patched_content: string | null;
+  };
+  incidentId: string;
+  isLast: boolean;
+}) {
+  const [fullScreen, setFullScreen] = useState(false);
+  const [fullFile, setFullFile] = useState<string | null>(null);
+  const [fullFileLoading, setFullFileLoading] = useState(false);
+
+  // Fetch the complete file from GitHub when the full-screen view opens.
+  useEffect(() => {
+    if (!fullScreen || fullFile !== null) return;
+    let cancelled = false;
+    setFullFileLoading(true);
+    incidentsApi
+      .getFileContent(incidentId, change.path)
+      .then((res) => {
+        if (!cancelled) setFullFile(res.content ?? "");
+      })
+      .catch(() => {
+        if (!cancelled) setFullFile("");
+      })
+      .finally(() => {
+        if (!cancelled) setFullFileLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [fullScreen, fullFile, incidentId, change.path]);
+
+  // Build the full-file view: the whole file as context, with the patched
+  // region shown as removed (red) + added (green) lines in place.
+  const fullDiffRows = buildFullFileDiffRows(
+    fullFile ?? "",
+    change.original_content ?? "",
+    change.patched_content ?? "",
+  );
+
+  return (
+    <div
+      style={{
+        borderBottom: isLast ? "none" : "1px solid #1e2d3d",
+        background: "#0d1117",
+      }}
+    >
+      {/* File header bar */}
+      <div
+        style={{
+          padding: "0.625rem 1.5rem",
+          background: "#161b22",
+          borderBottom: "1px solid #21262d",
+          display: "flex",
+          alignItems: "center",
+          gap: "0.625rem",
+        }}
+      >
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" style={{ color: "#8b949e", flexShrink: 0 }}>
+          <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" stroke="currentColor" strokeWidth="1.5" />
+          <polyline points="14 2 14 8 20 8" stroke="currentColor" strokeWidth="1.5" />
+        </svg>
+        <code style={{ fontSize: "0.8125rem", fontFamily: "var(--font-mono)", color: "#e6edf3", flex: 1 }}>
+          {change.path}
+        </code>
+        <span
+          style={{
+            fontSize: "0.6875rem",
+            padding: "0.125rem 0.5rem",
+            borderRadius: "9999px",
+            background: change.change_type === "create" ? "rgba(52,211,153,0.1)" : change.change_type === "delete" ? "rgba(248,113,113,0.1)" : "rgba(96,165,250,0.1)",
+            color: change.change_type === "create" ? "#34d399" : change.change_type === "delete" ? "#f87171" : "#60a5fa",
+            border: `1px solid ${change.change_type === "create" ? "rgba(52,211,153,0.3)" : change.change_type === "delete" ? "rgba(248,113,113,0.3)" : "rgba(96,165,250,0.3)"}`,
+            fontWeight: 500,
+          }}
+        >
+          {change.change_type === "create" ? "+ new file" : change.change_type === "delete" ? "− deleted" : "modified"}
+        </span>
+        {/* Full-screen option on the right side of the block */}
+        <button
+          onClick={() => setFullScreen(true)}
+          title="View full code in full screen"
+          aria-label="View full code in full screen"
+          style={{
+            display: "inline-flex",
+            alignItems: "center",
+            justifyContent: "center",
+            width: "26px",
+            height: "26px",
+            padding: 0,
+            background: "transparent",
+            border: "1px solid #30363d",
+            borderRadius: "var(--radius-sm, 6px)",
+            color: "#8b949e",
+            cursor: "pointer",
+            flexShrink: 0,
+          }}
+        >
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none">
+            <path d="M8 3H5a2 2 0 0 0-2 2v3M16 3h3a2 2 0 0 1 2 2v3M8 21H5a2 2 0 0 1-2-2v-3M16 21h3a2 2 0 0 0 2-2v-3" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" />
+          </svg>
+        </button>
+      </div>
+
+      {/* Default: full file code with removed lines in red and added lines in green */}
+      <FileChangeDiff
+        originalContent={change.original_content}
+        patchedContent={change.patched_content}
+      />
+
+      {/* Full-screen overlay: shows the full code base of this file */}
+      {fullScreen && (
+        <div
+          style={{
+            position: "fixed",
+            inset: 0,
+            zIndex: 1000,
+            background: "rgba(1, 4, 9, 0.85)",
+            display: "flex",
+            flexDirection: "column",
+            padding: "2rem",
+          }}
+          onClick={() => setFullScreen(false)}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            style={{
+              flex: 1,
+              display: "flex",
+              flexDirection: "column",
+              background: "#0d1117",
+              border: "1px solid #30363d",
+              borderRadius: "var(--radius-lg, 12px)",
+              overflow: "hidden",
+            }}
+          >
+            {/* Modal header */}
+            <div
+              style={{
+                padding: "0.75rem 1.25rem",
+                background: "#161b22",
+                borderBottom: "1px solid #21262d",
+                display: "flex",
+                alignItems: "center",
+                gap: "0.625rem",
+              }}
+            >
+              <code style={{ fontSize: "0.8125rem", fontFamily: "var(--font-mono)", color: "#e6edf3", flex: 1 }}>
+                {change.path}
+              </code>
+              <button
+                onClick={() => setFullScreen(false)}
+                aria-label="Close full screen"
+                style={{
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: "0.375rem",
+                  padding: "0.25rem 0.625rem",
+                  background: "transparent",
+                  border: "1px solid #30363d",
+                  borderRadius: "var(--radius-sm, 6px)",
+                  color: "#8b949e",
+                  cursor: "pointer",
+                  fontSize: "0.75rem",
+                }}
+              >
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none">
+                  <path d="M18 6 6 18M6 6l12 12" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" />
+                </svg>
+                Close
+              </button>
+            </div>
+
+            {/* Full file code — removed line(s) in red, updated line(s) in green */}
+            <div
+              style={{
+                flex: 1,
+                overflow: "auto",
+                background: "#0d1117",
+                fontFamily: "var(--font-mono)",
+                fontSize: "0.8rem",
+                lineHeight: 1.6,
+              }}
+            >
+              {fullFileLoading && fullFile === null ? (
+                <div style={{ padding: "1rem", color: "#8b949e", fontSize: "0.8125rem" }}>
+                  Loading full file…
+                </div>
+              ) : (
+                <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                  <tbody>
+                    {fullDiffRows.map((row, idx) => {
+                      let bg = "transparent";
+                      let color = "#e6edf3";
+                      let prefix = " ";
+                      if (row.type === "removed") {
+                        bg = "rgba(248,81,73,0.15)";
+                        color = "#f85149";
+                        prefix = "-";
+                      } else if (row.type === "added") {
+                        bg = "rgba(46,160,67,0.15)";
+                        color = "#3fb950";
+                        prefix = "+";
+                      }
+                      return (
+                        <tr key={idx} style={{ background: bg }}>
+                          <td
+                            style={{
+                              padding: "0 1rem",
+                              color: "#3d444d",
+                              userSelect: "none",
+                              textAlign: "right",
+                              minWidth: "2.5rem",
+                              fontSize: "0.75rem",
+                              borderRight: "1px solid #21262d",
+                              verticalAlign: "top",
+                            }}
+                          >
+                            {row.lineNo ?? ""}
+                          </td>
+                          <td
+                            style={{
+                              padding: "0 0.5rem",
+                              color,
+                              userSelect: "none",
+                              textAlign: "center",
+                              verticalAlign: "top",
+                            }}
+                          >
+                            {prefix}
+                          </td>
+                          <td style={{ padding: "0 1rem 0 0", color, whiteSpace: "pre", verticalAlign: "top" }}>
+                            {row.text || " "}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function FileChangeDiff({
+  originalContent,
+  patchedContent,
+}: {
+  originalContent: string | null;
+  patchedContent: string | null;
+}) {
+  const original = originalContent ?? "";
+  const patched = patchedContent ?? "";
+
+  // When there's no original (new file) show the full patched content as all-added.
+  const rows = computeLineDiff(original, patched);
+
+  if (rows.length === 0) {
+    return (
+      <div style={{ padding: "1rem", background: "#0d1117", fontSize: "0.8125rem", color: "#8b949e" }}>
+        No code content available for this change.
+      </div>
+    );
+  }
+
+  return (
+    <div
+      style={{
+        maxHeight: "480px",
+        overflow: "auto",
+        background: "#0d1117",
+        borderTop: "1px solid #21262d",
+        fontFamily: "var(--font-mono)",
+        fontSize: "0.8rem",
+        lineHeight: 1.6,
+      }}
+    >
+      <table style={{ width: "100%", borderCollapse: "collapse" }}>
+        <tbody>
+          {rows.map((row, idx) => {
+            let bg = "transparent";
+            let color = "#e6edf3";
+            let prefix = " ";
+            if (row.type === "removed") {
+              bg = "rgba(248,81,73,0.15)";
+              color = "#f85149";
+              prefix = "-";
+            } else if (row.type === "added") {
+              bg = "rgba(46,160,67,0.15)";
+              color = "#3fb950";
+              prefix = "+";
+            }
+            return (
+              <tr key={idx} style={{ background: bg }}>
+                <td
+                  style={{
+                    padding: "0 0.75rem",
+                    color: "#3d444d",
+                    userSelect: "none",
+                    textAlign: "right",
+                    minWidth: "2.25rem",
+                    fontSize: "0.75rem",
+                    verticalAlign: "top",
+                  }}
+                >
+                  {row.oldNo ?? ""}
+                </td>
+                <td
+                  style={{
+                    padding: "0 0.75rem",
+                    color: "#3d444d",
+                    userSelect: "none",
+                    textAlign: "right",
+                    minWidth: "2.25rem",
+                    fontSize: "0.75rem",
+                    borderRight: "1px solid #21262d",
+                    verticalAlign: "top",
+                  }}
+                >
+                  {row.newNo ?? ""}
+                </td>
+                <td
+                  style={{
+                    padding: "0 0.5rem",
+                    color,
+                    userSelect: "none",
+                    textAlign: "center",
+                    verticalAlign: "top",
+                  }}
+                >
+                  {prefix}
+                </td>
+                <td
+                  style={{
+                    padding: "0 1rem 0 0",
+                    color,
+                    whiteSpace: "pre",
+                    verticalAlign: "top",
+                  }}
+                >
+                  {row.text || " "}
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
 // ─── Patch Panel ──────────────────────────────────────────────────────────────
 
 function PatchPanel({
   patch,
+  incidentId,
   onApprove,
   onReject,
   onGenerate,
   hasAnalysis,
 }: {
   patch: Patch | null;
+  incidentId: string;
   onApprove: () => Promise<void>;
   onReject: () => Promise<void>;
   onGenerate?: () => Promise<void>;
@@ -738,7 +1349,7 @@ function PatchPanel({
                 await onApprove().finally(() => setApproving(false));
               }}
             >
-              {approving ? "Approving…" : "Approve & Create PR"}
+              {approving ? "Pushing…" : "Approve & Push to GitHub"}
             </button>
             <button
               className="btn btn-ghost"
@@ -748,7 +1359,7 @@ function PatchPanel({
                 await onApprove().finally(() => setApproving(false));
               }}
             >
-              Approve (no PR)
+              Approve (no push)
             </button>
             <button
               className="btn btn-danger"
@@ -771,7 +1382,7 @@ function PatchPanel({
             className="btn btn-ghost"
             style={{ marginTop: "1rem", display: "inline-flex" }}
           >
-            View PR on GitHub →
+            View pushed code on GitHub →
           </a>
         )}
       </div>
@@ -788,54 +1399,18 @@ function PatchPanel({
             </span>
           </div>
           {patch.file_changes.map((change, i) => (
-            <div
+            <FileChangeRow
               key={i}
-              style={{
-                borderBottom: i < patch.file_changes!.length - 1 ? "1px solid #1e2d3d" : "none",
-                background: "#0d1117",
-              }}
-            >
-              {/* File header bar */}
-              <div
-                style={{
-                  padding: "0.625rem 1.5rem",
-                  background: "#161b22",
-                  borderBottom: "1px solid #21262d",
-                  display: "flex",
-                  alignItems: "center",
-                  gap: "0.625rem",
-                }}
-              >
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" style={{ color: "#8b949e", flexShrink: 0 }}>
-                  <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" stroke="currentColor" strokeWidth="1.5"/>
-                  <polyline points="14 2 14 8 20 8" stroke="currentColor" strokeWidth="1.5"/>
-                </svg>
-                <code style={{ fontSize: "0.8125rem", fontFamily: "var(--font-mono)", color: "#e6edf3", flex: 1 }}>
-                  {change.path}
-                </code>
-                <span
-                  style={{
-                    fontSize: "0.6875rem",
-                    padding: "0.125rem 0.5rem",
-                    borderRadius: "9999px",
-                    background: change.change_type === "create" ? "rgba(52,211,153,0.1)" : change.change_type === "delete" ? "rgba(248,113,113,0.1)" : "rgba(96,165,250,0.1)",
-                    color: change.change_type === "create" ? "#34d399" : change.change_type === "delete" ? "#f87171" : "#60a5fa",
-                    border: `1px solid ${change.change_type === "create" ? "rgba(52,211,153,0.3)" : change.change_type === "delete" ? "rgba(248,113,113,0.3)" : "rgba(96,165,250,0.3)"}`,
-                    fontWeight: 500,
-                  }}
-                >
-                  {change.change_type === "create" ? "+ new file" : change.change_type === "delete" ? "− deleted" : "modified"}
-                </span>
-              </div>
-
-              {/* Diff content */}
-              {change.patched_content && (
-                <DiffViewer content={change.patched_content} />
-              )}
-            </div>
+              change={change}
+              incidentId={incidentId}
+              isLast={i >= patch.file_changes!.length - 1}
+            />
           ))}
         </div>
       )}
+
+      {/* Verification — static analysis + risk, shown within the Patches tab */}
+      <VerificationPanel patch={patch} />
     </div>
   );
 }
@@ -1009,38 +1584,6 @@ function formatDateTime(dateStr: string): string {
     hour: "2-digit",
     minute: "2-digit",
   });
-}
-
-function ImpactPanel({ analysis }: { analysis: Analysis | null }) {
-  if (!analysis || !analysis.affected_files || analysis.affected_files.length === 0) {
-    return <EmptyPanel title="No impact data" message="Impact data will be available after root cause analysis identifies affected files." />;
-  }
-  return (
-    <div style={{ display: "flex", flexDirection: "column", gap: "1rem" }}>
-      <div className="card">
-        <p className="label" style={{ marginBottom: "1rem" }}>DOWNSTREAM IMPACT</p>
-        <div style={{ display: "flex", flexDirection: "column", gap: "1.25rem", padding: "0.5rem 0" }}>
-          {analysis.affected_files.map((file, i) => (
-            <div key={i} style={{ display: "flex", flexDirection: "column", gap: "0.5rem" }}>
-              <div style={{ display: "flex", alignItems: "center", gap: "0.75rem" }}>
-                <span style={{ fontSize: "0.8125rem", fontFamily: "var(--font-mono)", color: "var(--text-primary)" }}>{file}</span>
-              </div>
-              <div style={{ paddingLeft: "0.25rem", display: "flex", flexDirection: "column", gap: "0.25rem" }}>
-                <div style={{ display: "flex", alignItems: "center", gap: "0.75rem" }}>
-                  <span style={{ color: "var(--border-strong)" }}>↳</span>
-                  <span style={{ fontSize: "0.75rem", color: "var(--text-secondary)" }}>Dependent modules</span>
-                </div>
-                <div style={{ display: "flex", alignItems: "center", gap: "0.75rem" }}>
-                  <span style={{ color: "var(--border-strong)" }}>↳</span>
-                  <span style={{ fontSize: "0.75rem", color: "var(--text-dim)" }}>Production build</span>
-                </div>
-              </div>
-            </div>
-          ))}
-        </div>
-      </div>
-    </div>
-  );
 }
 
 function VerificationPanel({ patch }: { patch: Patch | null }) {

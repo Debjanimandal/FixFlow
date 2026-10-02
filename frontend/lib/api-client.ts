@@ -77,7 +77,15 @@ export interface Analysis {
   verification_plan: string[] | null;
   prompt_tokens: number | null;
   completion_tokens: number | null;
+  repository_full_name?: string | null;
   created_at: string;
+}
+
+export interface AffectedSource {
+  path: string;
+  content: string | null;
+  error_lines: number[];
+  available: boolean;
 }
 
 export interface FileChange {
@@ -477,6 +485,12 @@ export const incidents = {
   },
   listAnalyses(id: string): Promise<Analysis[]> {
     return request<Analysis[]>(`/api/v1/incidents/${id}/analyses`);
+  },
+  getAffectedSources(id: string): Promise<AffectedSource[]> {
+    return request<AffectedSource[]>(`/api/v1/incidents/${id}/affected-sources`);
+  },
+  getFileContent(id: string, path: string): Promise<{ path: string; content: string | null; available: boolean }> {
+    return request(`/api/v1/incidents/${id}/file-content?path=${encodeURIComponent(path)}`);
   },
   listPatches(id: string): Promise<Patch[]> {
     return request<Patch[]>(`/api/v1/incidents/${id}/patches`);

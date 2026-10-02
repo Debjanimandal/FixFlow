@@ -110,6 +110,7 @@ class AnalysisResponse(BaseModel):
     verification_plan: list | None
     prompt_tokens: int | None
     completion_tokens: int | None
+    repository_full_name: str | None = None
     created_at: datetime
 
     model_config = {"from_attributes": True}

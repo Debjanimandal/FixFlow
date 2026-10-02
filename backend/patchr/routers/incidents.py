@@ -140,7 +140,210 @@ async def list_analyses(
         select(Analysis).where(Analysis.incident_id == incident_id).order_by(Analysis.created_at.desc())
     )
     analyses = result.scalars().all()
-    return [AnalysisResponse.model_validate(a) for a in analyses]
+
+    # Resolve the incident's repository so each affected file can be shown
+    # against its actual source root (e.g. the real "owner/repo" the file lives in).
+    incident_result = await db.execute(
+        select(Incident).where(Incident.id == incident_id)
+    )
+    incident = incident_result.scalar_one_or_none()
+    repository_full_name: str | None = None
+    if incident is not None:
+        repo_result = await db.execute(
+            select(Repository.full_name).where(Repository.id == incident.repository_id)
+        )
+        repository_full_name = repo_result.scalar_one_or_none()
+
+    responses: list[AnalysisResponse] = []
+    for a in analyses:
+        response = AnalysisResponse.model_validate(a)
+        response.repository_full_name = repository_full_name
+        responses.append(response)
+    return responses
+
+
+@router.get("/{incident_id}/affected-sources")
+async def get_affected_sources(
+    incident_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+    _owner: str = Depends(get_current_owner),
+) -> list[dict]:
+    """
+    Return the FULL source code of each affected file for the latest analysis,
+    with the exact line number(s) where the error occurs marked for highlighting.
+
+    The error lines are detected by matching the AI evidence snippets against
+    the real file content fetched from GitHub (at the incident's commit SHA,
+    falling back to the repository default branch).
+    """
+    from patchr.db.models import Analysis
+    from patchr.integrations.github import get_github_client, GitHubError
+
+    # Load incident + repository
+    inc_result = await db.execute(select(Incident).where(Incident.id == incident_id))
+    incident = inc_result.scalar_one_or_none()
+    if not incident:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Incident not found")
+
+    repo_result = await db.execute(
+        select(Repository).where(Repository.id == incident.repository_id)
+    )
+    repo = repo_result.scalar_one_or_none()
+
+    # Latest analysis (holds affected_files + evidence)
+    analysis_result = await db.execute(
+        select(Analysis)
+        .where(Analysis.incident_id == incident_id)
+        .order_by(Analysis.created_at.desc())
+        .limit(1)
+    )
+    analysis = analysis_result.scalar_one_or_none()
+
+    affected_files: list[str] = list(analysis.affected_files or []) if analysis else []
+    evidence: list[str] = list(analysis.evidence or []) if analysis else []
+
+    if not repo or not affected_files:
+        return []
+
+    if not settings.github_token or settings.github_token.startswith("ghp_your"):
+        # No token — return the file names without content so the UI can still
+        # render a message instead of failing.
+        return [
+            {
+                "path": path,
+                "content": None,
+                "error_lines": [],
+                "available": False,
+            }
+            for path in affected_files
+        ]
+
+    ref = incident.commit_sha or repo.default_branch or "main"
+    sources: list[dict] = []
+
+    async with get_github_client(settings.github_token) as gh:
+        for path in affected_files[:10]:
+            content: str | None = None
+            try:
+                fc = await gh.get_file_content(repo.full_name, path, ref=ref)
+                if fc is None and incident.commit_sha:
+                    # Fall back to the default branch if the commit ref failed
+                    fc = await gh.get_file_content(
+                        repo.full_name, path, ref=repo.default_branch or "main"
+                    )
+                content = fc.content if fc else None
+            except GitHubError:
+                content = None
+            except Exception:
+                content = None
+
+            error_lines = _detect_error_lines(content, evidence) if content else []
+
+            sources.append({
+                "path": path,
+                "content": content,
+                "error_lines": error_lines,
+                "available": content is not None,
+            })
+
+    return sources
+
+
+@router.get("/{incident_id}/file-content")
+async def get_file_content_for_incident(
+    incident_id: uuid.UUID,
+    path: str,
+    db: AsyncSession = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+    _owner: str = Depends(get_current_owner),
+) -> dict:
+    """
+    Return the FULL source code of a single file (by repo-relative `path`) for
+    this incident, fetched from GitHub at the incident's commit SHA (falling
+    back to the repository default branch).
+
+    Used by the patch full-screen view so it can show the complete file around
+    the patched region rather than only the changed snippet.
+    """
+    from patchr.integrations.github import get_github_client, GitHubError
+
+    inc_result = await db.execute(select(Incident).where(Incident.id == incident_id))
+    incident = inc_result.scalar_one_or_none()
+    if not incident:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Incident not found")
+
+    repo_result = await db.execute(
+        select(Repository).where(Repository.id == incident.repository_id)
+    )
+    repo = repo_result.scalar_one_or_none()
+    if not repo:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Repository not found")
+
+    if not settings.github_token or settings.github_token.startswith("ghp_your"):
+        return {"path": path, "content": None, "available": False}
+
+    ref = incident.commit_sha or repo.default_branch or "main"
+    content: str | None = None
+    try:
+        async with get_github_client(settings.github_token) as gh:
+            fc = await gh.get_file_content(repo.full_name, path, ref=ref)
+            if fc is None and incident.commit_sha:
+                fc = await gh.get_file_content(
+                    repo.full_name, path, ref=repo.default_branch or "main"
+                )
+            content = fc.content if fc else None
+    except GitHubError:
+        content = None
+    except Exception:
+        content = None
+
+    return {"path": path, "content": content, "available": content is not None}
+
+
+def _detect_error_lines(content: str, evidence: list[str]) -> list[int]:
+    """
+    Determine which 1-based line numbers of `content` are implicated by the
+    AI evidence. A line is flagged if a meaningful evidence snippet appears
+    within it (case-insensitive substring match). Returns a sorted unique list.
+    """
+    if not content or not evidence:
+        return []
+
+    lines = content.splitlines()
+    flagged: set[int] = set()
+
+    # Build normalized snippets from evidence. Evidence often contains log noise;
+    # we match on substantial fragments (>= 6 chars) so trivial tokens don't
+    # over-highlight the whole file.
+    snippets: list[str] = []
+    for ev in evidence:
+        if not isinstance(ev, str):
+            continue
+        text = ev.strip()
+        if len(text) >= 6:
+            snippets.append(text.lower())
+        # Also pull out quoted fragments like '...' or "..." which usually
+        # contain the exact offending code (import paths, symbol names).
+        import re as _re
+        for frag in _re.findall(r"['\"`]([^'\"`]{4,})['\"`]", ev):
+            snippets.append(frag.strip().lower())
+
+    if not snippets:
+        return []
+
+    for idx, line in enumerate(lines, start=1):
+        line_lc = line.lower()
+        if not line_lc.strip():
+            continue
+        for snip in snippets:
+            # Match either direction: the snippet is in the line, or (for short
+            # lines) the line is contained in a longer evidence snippet.
+            if (snip in line_lc) or (len(line_lc.strip()) >= 6 and line_lc.strip() in snip):
+                flagged.add(idx)
+                break
+
+    return sorted(flagged)
 
 
 @router.get("/{incident_id}/patches", response_model=list[PatchResponse])
