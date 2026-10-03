@@ -6,9 +6,25 @@ Separate from DB models — never expose raw ORM objects to the API layer.
 """
 
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_serializer
+
+
+def _as_utc_iso(dt: datetime | None) -> str | None:
+    """
+    Serialize a datetime as a UTC-aware ISO string (with a '+00:00' offset).
+
+    The DB (SQLite) returns naive datetimes even though the app always stores
+    UTC. Without a timezone marker the frontend parses the string as *local*
+    time, which skews the displayed time and the "x ago" value. Stamping naive
+    values as UTC fixes that.
+    """
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.isoformat()
 
 
 # ─── Auth ──────────────────────────────────────────────────────────────────────
@@ -67,6 +83,10 @@ class IncidentListItem(BaseModel):
 
     model_config = {"from_attributes": True}
 
+    @field_serializer("created_at", "updated_at")
+    def _ser_dt(self, dt: datetime) -> str | None:
+        return _as_utc_iso(dt)
+
 
 class IncidentDetail(BaseModel):
     id: uuid.UUID
@@ -86,6 +106,10 @@ class IncidentDetail(BaseModel):
     updated_at: datetime
 
     model_config = {"from_attributes": True}
+
+    @field_serializer("created_at", "updated_at", "resolved_at")
+    def _ser_dt(self, dt: datetime | None) -> str | None:
+        return _as_utc_iso(dt)
 
 
 class IncidentUpdate(BaseModel):

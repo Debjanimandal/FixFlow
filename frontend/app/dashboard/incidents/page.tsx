@@ -294,9 +294,29 @@ function IncidentRow({ incident, index }: { incident: IncidentListItem; index: n
         </span>
       </td>
       <td style={{ padding: "0.875rem 1.25rem", whiteSpace: "nowrap" }}>
-        <span style={{ fontSize: "0.75rem", color: "var(--text-dim)" }}>
-          {formatRelative(incident.created_at)}
-        </span>
+        {isResolvedStatus(incident.status) ? (
+          // Fixed/closed — show the actual time it was resolved/updated.
+          <span
+            title={`Occurred ${formatAbsolute(incident.created_at)} · Updated ${formatRelative(incident.updated_at)}`}
+            style={{ display: "flex", flexDirection: "column", gap: "0.125rem" }}
+          >
+            <span style={{ fontSize: "0.75rem", color: "var(--text-secondary)" }}>
+              {formatAbsolute(incident.updated_at)}
+            </span>
+            <span style={{ fontSize: "0.625rem", color: "var(--text-dim)" }}>fixed</span>
+          </span>
+        ) : (
+          // Open — show the actual time the build error happened.
+          <span
+            title={formatRelative(incident.created_at)}
+            style={{ display: "flex", flexDirection: "column", gap: "0.125rem" }}
+          >
+            <span style={{ fontSize: "0.75rem", color: "var(--text-dim)" }}>
+              {formatAbsolute(incident.created_at)}
+            </span>
+            <span style={{ fontSize: "0.625rem", color: "var(--text-dim)" }}>occurred</span>
+          </span>
+        )}
       </td>
     </tr>
   );
@@ -351,4 +371,19 @@ function formatRelative(dateStr: string): string {
   if (mins < 60) return `${mins}m ago`;
   if (hours < 24) return `${hours}h ago`;
   return `${days}d ago`;
+}
+
+/** Absolute wall-clock time, e.g. "Oct 2, 01:22 PM". */
+function formatAbsolute(dateStr: string): string {
+  return new Date(dateStr).toLocaleString("en-US", {
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
+/** Statuses that mean the incident has been fixed/closed out. */
+function isResolvedStatus(status: string): boolean {
+  return status === "resolved" || status === "dismissed";
 }

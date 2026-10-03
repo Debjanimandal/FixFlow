@@ -109,21 +109,6 @@ export default function RepositoryDetailPage({ params }: Props) {
     }
   }
 
-  // Trigger a simulated runtime failure to verify end-to-end AI diagnosis and patching
-  async function handleSimulateRuntime() {
-    setScanMode("runtime");
-    setScanning(true);
-    setScanMessage("Simulating runtime crash & queueing AI diagnosis...");
-    try {
-      const result = await reposApi.simulateRuntime(id);
-      setScanMessage(`Runtime Incident created! ${result.title} — AI root-cause analysis and patch queued.`);
-    } catch (e: any) {
-      setScanMessage(e.detail ?? "Failed to simulate runtime error");
-    } finally {
-      setScanning(false);
-    }
-  }
-
   if (loading) return <PageSkeleton />;
   if (error || !repo) return <NotFound />;
 
@@ -188,21 +173,6 @@ export default function RepositoryDetailPage({ params }: Props) {
                   }}
                 >
                   {scanning && scanMode === "runtime" ? "Scanning..." : "Scan Runtime"}
-                </button>
-                <button
-                  onClick={handleSimulateRuntime}
-                  disabled={scanning}
-                  className="btn"
-                  title="Simulate a live runtime exception to test AI analysis and automated patching"
-                  style={{
-                    fontSize: "0.8125rem",
-                    background: "rgba(239, 68, 68, 0.1)",
-                    color: "var(--severity-critical)",
-                    border: "1px solid rgba(239, 68, 68, 0.3)",
-                    fontWeight: 600,
-                  }}
-                >
-                  ⚡ Simulate Runtime Crash
                 </button>
                 <a href={`https://github.com/${repo.full_name}`} target="_blank" rel="noreferrer" className="btn btn-ghost" style={{ fontSize: "0.8125rem" }}>
                   View on GitHub &#8599;

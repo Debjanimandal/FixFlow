@@ -448,12 +448,6 @@ export const repositories = {
   scanRuntime(repoId: string, sinceMinutes = 30): Promise<{ scanned: boolean; incidents_created: number; message: string; incidents: Array<{ incident_id: string; title: string; path: string; error_count: number; status: string }> }> {
     return request(`/api/v1/repositories/${repoId}/scan-runtime?since_minutes=${sinceMinutes}`, { method: "POST" });
   },
-  simulateRuntime(repoId: string, payload?: { message?: string; path?: string; status_code?: number }): Promise<{ success: boolean; incident_id: string; title: string; message: string }> {
-    return request(`/api/v1/repositories/${repoId}/simulate-runtime-error`, {
-      method: "POST",
-      body: JSON.stringify(payload ?? {}),
-    });
-  },
   scanAll(): Promise<{ repos_scanned: number; incidents_created: number; incidents: Array<{ incident_id: string; title: string; commit_sha: string; status: string }> }> {
     return request("/api/v1/repositories/scan-all", { method: "POST" });
   },
